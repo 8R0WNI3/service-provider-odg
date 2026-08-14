@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -39,7 +40,6 @@ import (
 	"github.com/openmcp-project/openmcp-operator/lib/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/openmcp-project/service-provider-template/api/crds"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,16 +48,19 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	"github.com/open-component-model/service-provider-odg/api/crds"
 
 	"github.com/openmcp-project/opencontrolplane-runtime/pkg/serviceprovider"
 	localaccess "github.com/openmcp-project/opencontrolplane-runtime/pkg/serviceprovider/clusteraccess"
-	{{.KindLower}}sv1alpha1 "github.com/openmcp-project/service-provider-template/api/v1alpha1"
-	"github.com/openmcp-project/service-provider-template/internal/controller"
+
+	odgsv1alpha1 "github.com/open-component-model/service-provider-odg/api/v1alpha1"
+	"github.com/open-component-model/service-provider-odg/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -65,9 +68,7 @@ var (
 	platformScheme   = runtime.NewScheme()
 	onboardingScheme = runtime.NewScheme()
 	mcpScheme        = runtime.NewScheme()
-{{- if .WithWorkloadCluster }}
 	workloadScheme   = runtime.NewScheme()
-{{- end }}
 	setupLog         = ctrl.Log.WithName("setup")
 )
 
@@ -76,15 +77,13 @@ func init() {
 	initPlatformScheme()
 	initOnboardingScheme()
 	initMcpScheme()
-{{- if .WithWorkloadCluster }}
 	initWorkloadScheme()
-{{- end }}
 }
 
 func initPlatformScheme() {
 	utilruntime.Must(clientgoscheme.AddToScheme(platformScheme))
 	utilruntime.Must(apiextensionv1.AddToScheme(platformScheme))
-	utilruntime.Must({{.KindLower}}sv1alpha1.AddToScheme(platformScheme))
+	utilruntime.Must(odgsv1alpha1.AddToScheme(platformScheme))
 	utilruntime.Must(clustersv1alpha1.AddToScheme(platformScheme))
 	utilruntime.Must(providerv1alpha1.AddToScheme(platformScheme))
 }
@@ -92,23 +91,21 @@ func initPlatformScheme() {
 func initOnboardingScheme() {
 	utilruntime.Must(clientgoscheme.AddToScheme(onboardingScheme))
 	utilruntime.Must(apiextensionv1.AddToScheme(onboardingScheme))
-	utilruntime.Must({{.KindLower}}sv1alpha1.AddToScheme(onboardingScheme))
+	utilruntime.Must(odgsv1alpha1.AddToScheme(onboardingScheme))
 }
 
 func initMcpScheme() {
 	utilruntime.Must(clientgoscheme.AddToScheme(mcpScheme))
 	utilruntime.Must(apiextensionv1.AddToScheme(mcpScheme))
 }
-
-{{- if .WithWorkloadCluster }}
 func initWorkloadScheme() {
 	utilruntime.Must(clientgoscheme.AddToScheme(workloadScheme))
 }
-{{- end }}
 
 const (
 	debugEnvVar = "DEV_DEBUG"
 )
+
 // nolint:gocyclo
 func main() {
 	var command string
@@ -236,7 +233,7 @@ func main() {
 		os.Exit(1)
 	}
 	clusterAccessManager := clusteraccess.NewClusterAccessManager(platformCluster.Client(),
-		{{.KindLower}}sv1alpha1.GroupVersion.Group, os.Getenv("POD_NAMESPACE"))
+		odgsv1alpha1.GroupVersion.Group, os.Getenv("POD_NAMESPACE"))
 	clusterAccessManager.WithLogger(&log).
 		WithInterval(10 * time.Second).
 		WithTimeout(30 * time.Minute)
@@ -270,9 +267,9 @@ func main() {
 		}
 
 		spGVK := metav1.GroupVersionKind{
-			Group:   {{.KindLower}}sv1alpha1.GroupVersion.Group,
-			Version: {{.KindLower}}sv1alpha1.GroupVersion.Version,
-			Kind:    "{{.Kind}}",
+			Group:   odgsv1alpha1.GroupVersion.Group,
+			Version: odgsv1alpha1.GroupVersion.Version,
+			Kind:    "ODG",
 		}
 		if err := utils.RegisterGVKsAtServiceProvider(ctx, platformCluster.Client(), providerName, spGVK); err != nil {
 			setupLog.Error(err, "Failed to register GVK at ServiceProvider")
@@ -286,7 +283,7 @@ func main() {
 		{
 			Rules: []rbacv1.PolicyRule{
 				{
-					APIGroups: []string{ {{- .KindLower}}sv1alpha1.GroupVersion.Group},
+					APIGroups: []string{odgsv1alpha1.GroupVersion.Group},
 					Resources: []string{"*"},
 					Verbs:     []string{"*"},
 				},
@@ -305,7 +302,7 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "{{.GroupSuffix}}.{{.KindLower}}",
+		LeaderElectionID:       "services.open-control-plane.io.odg",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -361,7 +358,6 @@ func main() {
 		WithTokenAccess(mcpTokenAccessConfig).
 		WithScheme(mcpScheme).
 		Build()
-	{{- if .WithWorkloadCluster }}
 
 	// TODO: define minimum set of permission the service provider requires on the workload cluster
 	workloadTokenAccessConfig := &clustersv1alpha1.TokenConfig{
@@ -384,17 +380,16 @@ func main() {
 		},
 	}
 	workloadClusterRequest := advanced.NewClusterRequest("workload", "wl", advanced.StaticClusterRequestSpecGenerator(&clustersv1alpha1.ClusterRequestSpec{
-			Purpose: clustersv1alpha1.PURPOSE_WORKLOAD,
-		})).
+		Purpose: clustersv1alpha1.PURPOSE_WORKLOAD,
+	})).
 		WithNamespaceGenerator(advanced.DefaultNamespaceGeneratorForMCP).
 		WithTokenAccess(workloadTokenAccessConfig).
 		WithScheme(workloadScheme).
 		Build()
-	{{- end }}
 
 	clusterAccessReconciler := advanced.NewClusterAccessReconciler(platformCluster.Client(), providerName)
 	if debugEnabled() {
-		clusterAccessReconciler = localaccess.NewLocalAdvancedClusterAccessReconciler(clusterAccessReconciler)
+		clusterAccessReconciler = localaccess.NewLocalAdvancedClusterAccessReconciler(clusterAccessReconciler, localaccess.WithWorkloadCluster())
 	}
 
 	clusterAccessReconciler.
@@ -406,28 +401,24 @@ func main() {
 			}
 		}).
 		Register(mcpClusterRequest).
-		{{- if .WithWorkloadCluster }}
 		Register(workloadClusterRequest).
-		{{- end }}
 		WithRetryInterval(10 * time.Second)
 
-	spr := serviceprovider.NewAPIReconcilerBuilder[*{{.KindLower}}sv1alpha1.{{.Kind}}, *{{.KindLower}}sv1alpha1.ProviderConfig]().
-		EmptyObjectProvider(func() *{{.KindLower}}sv1alpha1.{{.Kind}} { return &{{.KindLower}}sv1alpha1.{{.Kind}}{} }).
-		EmptyConfigProvider(func() *{{.KindLower}}sv1alpha1.ProviderConfig { return &{{.KindLower}}sv1alpha1.ProviderConfig{} }).
+	spr := serviceprovider.NewAPIReconcilerBuilder[*odgsv1alpha1.ODG, *odgsv1alpha1.ProviderConfig]().
+		EmptyObjectProvider(func() *odgsv1alpha1.ODG { return &odgsv1alpha1.ODG{} }).
+		EmptyConfigProvider(func() *odgsv1alpha1.ProviderConfig { return &odgsv1alpha1.ProviderConfig{} }).
 		PlatformCluster(platformCluster).
 		OnboardingCluster(onboardingCluster).
-		{{- if .WithSecretWatcher }}
 		SecretNamespace(podNamespace).
-		{{- end }}
-		Reconciler(&controller.{{.Kind}}Reconciler{
+		Reconciler(&controller.ODGReconciler{
 			OnboardingCluster: onboardingCluster,
 			PlatformCluster:   platformCluster,
 			PodNamespace:      podNamespace,
 		}).
 		AdvancedClusterAccessReconciler(clusterAccessReconciler).
 		MustBuild()
-	if err := spr.SetupWithManager(mgr, "{{.KindLower}}"); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "{{.Kind}}")
+	if err := spr.SetupWithManager(mgr, providerName); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ODG")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
@@ -476,7 +467,7 @@ func requestOnboardingClusterAccess(ctx context.Context, mgr clusteraccess.Manag
 func patchOnboardingClient(ctx context.Context, platformCluster *clusters.Cluster, onboardingCluster *clusters.Cluster, cmdSuffix string) (*clusters.Cluster, error) {
 	onboardingAr := &clustersv1alpha1.AccessRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusteraccess.StableRequestNameFromLocalName({{.KindLower}}sv1alpha1.GroupVersion.Group, cmdSuffix),
+			Name:      clusteraccess.StableRequestNameFromLocalName(odgsv1alpha1.GroupVersion.Group, cmdSuffix),
 			Namespace: os.Getenv("POD_NAMESPACE"),
 		},
 	}
@@ -485,8 +476,6 @@ func patchOnboardingClient(ctx context.Context, platformCluster *clusters.Cluste
 	}
 	return localaccess.MustPatchClusterClient(ctx, onboardingAr, onboardingCluster), nil
 }
-
-
 
 func debugEnabled() bool {
 	v := strings.ToLower(os.Getenv(debugEnvVar))
