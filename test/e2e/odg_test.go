@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -156,9 +155,9 @@ func TestServiceProvider(t *testing.T) {
 						t.Errorf("HelmRelease %q was not created: %v", chartName, err)
 						continue
 					}
-					if !strings.HasPrefix(helmRelease.Spec.TargetNamespace, "odg-system-") {
-						t.Errorf("HelmRelease %q targetNamespace mismatch: got %q, want prefix %q",
-							chartName, helmRelease.Spec.TargetNamespace, "odg-system-")
+					if helmRelease.Spec.TargetNamespace != "odg-system" {
+						t.Errorf("HelmRelease %q targetNamespace mismatch: got %q, want %q",
+							chartName, helmRelease.Spec.TargetNamespace, "odg-system")
 					}
 					if helmRelease.Spec.ChartRef == nil || helmRelease.Spec.ChartRef.Name != chartName {
 						t.Errorf("HelmRelease %q chartRef mismatch", chartName)
@@ -168,6 +167,54 @@ func TestServiceProvider(t *testing.T) {
 					}
 					t.Logf("HelmRelease %q validated (spec verified, deployment check skipped due to test credential limitations)", chartName)
 				}
+				return ctx
+			},
+		).
+		Assess("verify bootstrapping values secret merges ConfigMap and Secret refs",
+			func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+				valuesSecret := &corev1.Secret{}
+				err := wait.For(
+					func(ctx context.Context) (bool, error) {
+						err := c.Client().Resources().Get(ctx, "bootstrapping-values", tenantNamespace, valuesSecret)
+						return err == nil, nil
+					},
+					wait.WithTimeout(30*time.Second),
+					wait.WithInterval(2*time.Second),
+				)
+				if err != nil {
+					t.Errorf("bootstrapping-values Secret was not created: %v", err)
+					return ctx
+				}
+
+				raw, ok := valuesSecret.Data["values.yaml"]
+				if !ok {
+					t.Errorf("bootstrapping-values Secret has no values.yaml key")
+					return ctx
+				}
+
+				var merged map[string]any
+				if err := json.Unmarshal(raw, &merged); err != nil {
+					t.Errorf("bootstrapping-values Secret values.yaml is not valid JSON: %v", err)
+					return ctx
+				}
+
+				// ConfigMap contribution: extensions_cfg key must be present
+				if _, ok := merged["extensions_cfg"]; !ok {
+					t.Errorf("bootstrapping-values missing extensions_cfg (expected from ConfigurationRef ConfigMap)")
+				}
+
+				// Secret contribution: secrets key must be present and override/extend ConfigMap
+				if _, ok := merged["secrets"]; !ok {
+					t.Errorf("bootstrapping-values missing secrets (expected from SecretsRef Secret)")
+				}
+
+				t.Logf("bootstrapping-values Secret contains merged keys: %v", func() []string {
+					keys := make([]string, 0, len(merged))
+					for k := range merged {
+						keys = append(keys, k)
+					}
+					return keys
+				}())
 				return ctx
 			},
 		).
