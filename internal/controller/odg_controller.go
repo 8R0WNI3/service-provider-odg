@@ -695,7 +695,9 @@ var extensionsCfgGatedCharts = map[string]string{
 
 // syncExtensionsFromBootstrapping reads the enabled flags from the bootstrapping chart's
 // extensions_cfg section, mirrors them (underscore → hyphen key mapping) into the extensions
-// chart's helm values, and removes gated charts that are not enabled.
+// chart's helm values, and removes gated charts that are not enabled. It also suppresses the
+// in-cluster delivery-db chart when an external PostgreSQL hostname is detected in the
+// bootstrapping secrets (see isExternalDatabase).
 func (r *ODGReconciler) syncExtensionsFromBootstrapping(ctx context.Context, svcobj *apiv1alpha1.ODG, providerConfig *apiv1alpha1.ProviderConfig) error {
 	bootstrapValues, found := findHelmValues(providerConfig, "bootstrapping")
 	if !found {
@@ -717,6 +719,9 @@ func (r *ODGReconciler) syncExtensionsFromBootstrapping(ctx context.Context, svc
 
 	extCfg, _ := bootstrapMap["extensions_cfg"].(map[string]any)
 	providerConfig.Spec.Charts = filterGatedCharts(providerConfig.Spec.Charts, extCfg)
+	if isExternalDatabase(bootstrapMap) {
+		providerConfig.Spec.Charts = excludeChartByName(providerConfig.Spec.Charts, "delivery-db")
+	}
 	return applyExtensionsOverlay(providerConfig, extCfg)
 }
 
@@ -795,6 +800,42 @@ func isExtensionEnabled(extCfg map[string]any, key string) bool {
 		return true
 	}
 	return enabled
+}
+
+// isExternalDatabase returns true when the merged bootstrapping values contain a
+// secrets.delivery-db entry with a non-empty hostname, indicating an external
+// (managed) PostgreSQL instance is configured. When true, the caller should
+// suppress the in-cluster delivery-db chart (e.g. via excludeChartByName).
+func isExternalDatabase(bootstrapMap map[string]any) bool {
+	secrets, _ := bootstrapMap["secrets"].(map[string]any)
+	deliveryDB, _ := secrets["delivery-db"].(map[string]any)
+	for _, v := range deliveryDB {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		var entry struct {
+			Hostname string `json:"hostname"`
+		}
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			continue
+		}
+		if entry.Hostname != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// excludeChartByName returns a copy of charts with all entries matching name removed.
+func excludeChartByName(charts []apiv1alpha1.ODGChart, name string) []apiv1alpha1.ODGChart {
+	result := make([]apiv1alpha1.ODGChart, 0, len(charts))
+	for _, c := range charts {
+		if c.ChartName != name {
+			result = append(result, c)
+		}
+	}
+	return result
 }
 
 // deleteRemovedCharts deletes OCIRepository and HelmRelease objects in tenantNamespace
